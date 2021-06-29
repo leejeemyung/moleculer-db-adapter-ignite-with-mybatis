@@ -1,4 +1,5 @@
 /*eslint-disable */
+const _ = require("lodash");
 const { MoleculerServerError } = require("moleculer").Errors;
 const IgniteClient = require("apache-ignite-client");
 const mybatisMapper = require("mybatis-mapper");
@@ -10,11 +11,13 @@ const CacheConfiguration = IgniteClient.CacheConfiguration;
 class IgniteAdapter {
   /**
    * Creates an instance of IgniteAdapter.
-   * @param {Object} opts
+   * @param {string} url
+   * @param {object} opts
    *
    * @memberof IgniteAdapter
    */
-  constructor(opts) {
+  constructor(url, opts) {
+    this.url = url;
     this.opts = opts;
     this.mapper = mybatisMapper;
   }
@@ -40,6 +43,18 @@ class IgniteAdapter {
    * @memberof IgniteAdapter
    */
   connect() {
+    //0: match url, 1: db type, 2: user, 3: password
+    // 4: host, 5:port, 6: schema
+    const regexp = /^(\w+):\/\/"+(\w+)"+:"+(.+)"+@(\w+):(\d+)\/(\w+)$/g;
+    const group = regexp.exec(this.url);
+    if (7 > group) {
+      throw Error("Invalid database uri");
+    }
+    const [, , user, password, hostname, port, schema] = group;
+    const host = `${hostname}:${port}`;
+
+    const useTls = this.opts.useTls;
+    const connectionOption = this._getConnectOptions(this.opts);
     if (!this.service.schema.settings.mapperDir) {
       throw new MoleculerServerError(
         "Missing `mapperDir` definition in schema.settings of service!"
@@ -48,17 +63,17 @@ class IgniteAdapter {
     this.client = new IgniteClient((state, reason) => {
       this.service.logger.info("Ignite StateChanged", state, reason);
     });
-    this.configuration = new IgniteClientConfiguration(this.opts.host)
-      .setUserName(this.opts.user) // https://ignite.apache.org/docs/latest/security/authentication
-      .setPassword(this.opts.password) // https://www.bswen.com/2018/10/java-How-to-solve-Apache-ignite-IgniteException-Can-not-perform-the-operation-because-the-cluster-is-inactive.html
-      .setConnectionOptions(this.opts.useTLS, this.opts.connectionOptions); // https://ignite.apache.org/docs/latest/thin-clients/nodejs-thin-client#partition-awareness
+    const igniteConfiguration = new IgniteClientConfiguration(host)
+      .setUserName(user)
+      .setPassword(password)
+      .setConnectionOptions(useTls, connectionOption);
     this.mapper.createMapper(this.service.schema.settings.mapperDir);
     return this.client
-      .connect(this.configuration)
+      .connect(igniteConfiguration)
       .then(() =>
         this.client.getOrCreateCache(
           this.opts.cache,
-          new CacheConfiguration.setSqlSchema(this.opts.schema)
+          new CacheConfiguration().setSqlSchema(schema)
         )
       )
       .then((cache) => {
@@ -94,7 +109,7 @@ class IgniteAdapter {
    */
   async sendQuery(namespace, id, params) {
     const sql = this.mapper.getStatement(namespace, id, params);
-    //this.service.logger.info(sql);
+    this.service.logger.info(sql);
     try {
       let results = [];
       const sqlFieldsQuery = new SqlFieldsQuery(sql).setIncludeFieldNames(true);
@@ -114,6 +129,19 @@ class IgniteAdapter {
       this.service.logger.error("err: ", err);
       return err;
     }
+  }
+
+  /**
+   * Send SQL Query to Database
+   *
+   * @returns {object}
+   *
+   * @memberof MariaDbAdapter
+   */
+  _getConnectOptions(option) {
+    const optionCopy = _.cloneDeep(option);
+    delete optionCopy.useTls;
+    return optionCopy;
   }
 }
 
